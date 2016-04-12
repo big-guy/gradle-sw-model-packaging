@@ -1,0 +1,134 @@
+import org.gradle.api.internal.resolve.ProjectModelResolver
+import org.gradle.internal.service.ServiceRegistry
+
+@Managed
+interface InstallationSpec extends GeneralComponentSpec {
+}
+
+class BinaryMatcher {
+    static BinaryMatcher find(String projectPath, Closure cl) {
+        return new BinaryMatcher(projectPath, cl)
+    }
+
+    String projectPath
+    Closure cl
+
+    BinaryMatcher(String projectPath, Closure cl) {
+        this.projectPath = projectPath
+        this.cl = cl
+    }
+
+    def match(ProjectModelResolver modelResolver) {
+        // magic to find binary
+        def modelRegistry = modelResolver.resolveProjectModel(projectPath)
+        ComponentSpecContainer components = modelRegistry.find("components", ComponentSpecContainer.class);
+        cl.delegate = components
+        def found = cl()
+        println found
+        return found
+    }
+}
+
+@Managed
+interface FilesSourceSet extends LanguageSourceSet {
+    void setDest(String dest)
+    String getDest()
+
+    @Unmanaged
+    List<BinaryMatcher> getReferences()
+    void setReferences(List<BinaryMatcher> list)
+}
+
+@Managed
+interface LocalInstallationSpec extends InstallationSpec {
+}
+
+@Managed
+interface DebianPackageSpec extends InstallationSpec {
+    // void setBase(InstallationSpec component)
+    // InstallationSpec getBase()
+}
+
+@Managed
+interface InstallationBinarySpec extends BinarySpec {
+    File getOutputDir()
+    void setOutputDir(File outputDir)
+}
+
+class Rules extends RuleSource {
+    @ComponentType
+    void registerFilesSourceSet(TypeBuilder<FilesSourceSet> builder) {
+    }
+
+    @ComponentType
+    void registerInstallationSpec(TypeBuilder<InstallationSpec> builder) {
+    }
+
+    @ComponentType
+    void registerInstallationBinarySpec(TypeBuilder<InstallationBinarySpec> builder) {
+    }
+
+    @ComponentBinaries
+    void generateBinariesForComponents(ModelMap<InstallationBinarySpec> binaries, InstallationSpec component, BuildTypeContainer buildTypes, PlatformContainer platforms, @Path("buildDir") File buildDir) {
+        for (BuildType buildType : buildTypes) {
+            for (Platform platform : platforms) {
+                binaries.create("${buildType.name}${platform.name}", InstallationBinarySpec, new Action<InstallationBinarySpec>() {
+                    public void execute(InstallationBinarySpec binary) {
+                        binary.outputDir = new File(buildDir, binary.name)
+                    }
+                });
+            }
+        }
+    }
+
+    @BinaryTasks
+    void generateTasksForBinaries(ModelMap<Task> tasks, ServiceRegistry serviceRegistry, InstallationBinarySpec binary) {
+        def taskName = "stage${binary.buildTask.name}"
+        def modelResolver = serviceRegistry.get(ProjectModelResolver)
+        tasks.create(taskName, Sync, new Action<Sync>() {
+            public void execute(Sync sync) {
+                binary.getInputs().withType(FilesSourceSet) { sourceSet ->
+                    sync.into(binary.outputDir)
+                    sync.into(sourceSet.dest) {
+                        from(sourceSet.source)
+                        // from(references.collect { it.match(modelResolver) })
+                    }
+                }
+            }
+        });
+        binary.buildTask.dependsOn taskName
+    }
+}
+
+apply plugin: org.gradle.nativeplatform.plugins.NativeComponentModelPlugin
+apply plugin: Rules
+
+model {
+    platforms {
+        x86
+        x86_64
+    }
+    buildTypes {
+        debug
+        release
+    }
+    components {
+        main(NativeExecutableSpec)
+
+        localInstall(LocalInstallationSpec) {
+            sources {
+                bin(FilesSourceSet) {
+                    dest = "bin"
+                    source {
+                        srcDir file("src/foo")
+                        references = [
+                            BinaryMatcher.find(project.path) {
+                                []
+                            }
+                        ]
+                    }
+                }
+            }
+        }
+    }
+}
